@@ -17,8 +17,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -32,23 +32,29 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            script: dist:mac
+            args: --mac dmg --arm64
             files: dist/*.dmg
-            name: mac-dmg
+            name: mac-dmg-apple-silicon
+          - os: macos-latest
+            args: --mac dmg --x64
+            files: dist/*.dmg
+            name: mac-dmg-intel
           - os: windows-latest
-            script: dist:win
+            args: --win nsis --x64
             files: dist/*.exe
             name: windows-exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - name: Build
-        run: npm run ${{ matrix.script }}
+        shell: bash
+        # macOS runners sometimes fail to detach the DMG volume ("resource busy"); retry once.
+        run: npx electron-builder ${{ matrix.args }} --publish never || (rm -rf dist && sleep 15 && npx electron-builder ${{ matrix.args }} --publish never)
         env:
           # No signing certificates yet: build unsigned.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'

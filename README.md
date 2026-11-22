@@ -44,7 +44,7 @@ It talks to the console over the network with the X32's standard OSC protocol (U
 Ready-to-install builds are made automatically on GitHub for every push to `main`:
 
 1. Open the repo's **Actions** tab, then the latest **Build** run.
-2. Under **Artifacts**, download `mac-dmg` or `windows-exe`.
+2. Under **Artifacts**, download `mac-dmg-apple-silicon`, `mac-dmg-intel` or `windows-exe`.
    - Mac: `X32-Mixer-…-mac-arm64.dmg` for Apple Silicon (M1 and later), `…-mac-x64.dmg` for Intel Macs.
    - Windows: `X32-Mixer-…-win-x64.exe` (installer).
 
