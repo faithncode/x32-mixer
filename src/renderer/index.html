@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+    <title>X32 Mixer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">X32 Mixer</div>
+      <nav class="tabs" id="tabs">
+        <button data-view="mixer" class="active">Mixer</button>
+        <button data-view="sends">Monitor mixes</button>
+        <button data-view="sermon">Live stream</button>
+        <button data-view="fx">FX rack</button>
+        <button data-view="scenes">Scenes</button>
+      </nav>
+      <div class="conn">
+        <button id="sermonPill" class="ghost sermon-pill" title="Sermon mode">Sermon mode</button>
+        <div class="alert-wrap">
+          <button id="alertBtn" class="ghost alert-btn" title="Alerts">Alerts <span class="alert-badge" id="alertBadge" hidden></span></button>
+          <div class="alert-panel" id="alertPanel" hidden></div>
+        </div>
+        <span class="dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Offline</span>
+        <div class="scan-wrap">
+          <input id="hostInput" placeholder="Console IP" spellcheck="false" />
+          <div class="scan-list" id="scanList" hidden></div>
+        </div>
+        <button id="scanBtn" class="ghost">Scan</button>
+        <button id="connectBtn" class="primary">Connect</button>
+        <button id="settingsBtn" class="ghost icon-btn" title="Settings" aria-label="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div class="offline-banner" id="offlineBanner" hidden></div>
+    <main id="views">
+      <section class="view" id="view-mixer">
+        <div class="layerbar" id="layerbar"></div>
+        <div class="console">
+          <div class="strips" id="mixerStrips"></div>
+          <div class="pinned" id="mixerPinned"></div>
+        </div>
+        <div class="detail" id="detail" hidden></div>
+      </section>
+
+      <section class="view" id="view-sends" hidden>
+        <div class="layerbar" id="busbar"></div>
+        <div class="console">
+          <div class="strips" id="sendStrips"></div>
+          <div class="pinned" id="sendPinned"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-sermon" hidden>
+        <div class="sermon-view" id="sermonView"></div>
+      </section>
+
+      <section class="view" id="view-fx" hidden>
+        <div class="fx-grid" id="fxGrid"></div>
+      </section>
+
+      <section class="view" id="view-scenes" hidden>
+        <div class="scene-tools" id="sceneTools"></div>
+        <div class="scene-grid" id="sceneGrid"></div>
+      </section>
+    </main>
+
+    <div class="toast-stack" id="toastStack"></div>
+    <script src="../shared/x32.js"></script>
+    <script src="eq.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

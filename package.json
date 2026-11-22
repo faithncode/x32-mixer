@@ -1,0 +1,15 @@
+{
+  "name": "x32-mixer",
+  "version": "0.1.0",
+  "description": "Desktop remote control for Behringer X32 / Midas M32 consoles over OSC",
+  "main": "src/main/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "emulator": "node tools/x32-emulator.js",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
