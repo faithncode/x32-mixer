@@ -39,6 +39,23 @@ It talks to the console over the network with the X32's standard OSC protocol (U
 - The app reads the console on connect and only writes what you change.
 - Automatic features only touch the sends and fader they own, and your own moves always win.
 
+## Download
+
+Ready-to-install builds are made automatically on GitHub for every push to `main`:
+
+1. Open the repo's **Actions** tab, then the latest **Build** run.
+2. Under **Artifacts**, download `mac-dmg` or `windows-exe`.
+   - Mac: `X32-Mixer-…-mac-arm64.dmg` for Apple Silicon (M1 and later), `…-mac-x64.dmg` for Intel Macs.
+   - Windows: `X32-Mixer-…-win-x64.exe` (installer).
+
+To publish a numbered release with the files attached, push a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The builds are not code-signed yet:
+- **Mac:** the first time, right-click the app and choose **Open**, then **Open** again. If macOS still says it is damaged, run `xattr -cr "/Applications/X32 Mixer.app"`.
+- **Windows:** on the SmartScreen warning, click **More info**, then **Run anyway**.
+
+Build locally with `npm run dist:mac` or `npm run dist:win` (output in `dist/`).
+
 ## Run
 
 ```bash
