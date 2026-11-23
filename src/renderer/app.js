@@ -3067,6 +3067,58 @@ const outroLevel = (id) => X32.sendLevel(srcStrip(id), outro.bus);
 const outroOnPath = (id) => X32.sendOn(srcStrip(id), outro.bus);
 const outroLast = new Map(); // path -> value this run last wrote (not persisted)
 let outroSavedAt = 0;
+// When the fade finishes, the inputs are held off by this mix mute group on the
+// stream bus and their sends go back to their normal levels underneath it, so
+// next service the operator only has to unmute the group.
+const OUTRO_GROUP_ID = 'end-of-service';
+const outroGroup = () => (outro.bus ? busGroups(outro.bus).mutes.find((m) => m.id === OUTRO_GROUP_ID) : null);
+const outroInputIds = () => Object.entries(outro.sends).filter(([, e]) => !e.play && !e.skip).map(([id]) => id);
+
+// Mute the faded inputs with the group, then put each send back to its level
+// once it is really off. Idempotent: runs every tick until everything is done.
+function outroMuteStep() {
+  const g = busGroups(outro.bus);
+  let grp = outroGroup();
+  if (!outro.grouped) {
+    if (!grp && g.mutes.length >= MIX_MUTE_MAX) {
+      // No free mute group: leave the inputs faded down instead.
+      Object.assign(outro, { phase: 'ended', noGroup: true });
+      saveOutro();
+      toast(`All ${MIX_MUTE_MAX} mute groups on this bus are in use, so the inputs stay faded down. Back to live brings them up.`);
+      return;
+    }
+    if (!grp) {
+      grp = { id: OUTRO_GROUP_ID, name: 'End of service', members: [], muted: false };
+      g.mutes.push(grp);
+    }
+    grp.members = outroInputIds();
+    grp.muted = true;
+    outro.grouped = true;
+    saveMix();
+    saveOutro();
+    if (currentView === 'sends') rerenderCurrent();
+  }
+  reconcileMutes(outro.bus);
+  let pending = 0;
+  for (const id of grp.members) {
+    const e = outro.sends[id];
+    if (!e || e.restored) continue;
+    const lv = outroLevel(id);
+    const on = outroOnPath(id);
+    if (!known(lv) || !known(on) || state.get(on) !== 0) {
+      pending++;
+      continue;
+    }
+    if (Math.abs(state.get(lv) - e.saved) > 1e-6) setParam(lv, e.saved); // silent: the send is off
+    e.restored = true;
+  }
+  if (!pending) {
+    outro.phase = 'ended';
+    renderOutroPill();
+    if (currentView === 'sermon') renderSermonView();
+  }
+  saveOutro();
+}
 
 function outroPaths(bus) {
   return OUTRO_KINDS.flatMap((k) => X32.strips(k)).flatMap((s) => [X32.sendLevel(s, bus), X32.sendOn(s, bus)]);
@@ -3111,19 +3163,36 @@ async function startOutro() {
     }
   }
   outroLast.clear();
-  Object.assign(outro, { phase: 'ending', host: connHost, bus, progress: 0, sends, playOn });
+  Object.assign(outro, { phase: 'ending', host: connHost, bus, progress: 0, sends, playOn, grouped: false, noGroup: false });
   saveOutro();
   renderOutroPill();
   if (currentView === 'sermon') renderSermonView();
 }
 
+let outroReturning = false;
 async function backToLive() {
-  if (!outroActive() || outro.phase === 'returning') return;
+  if (!outroActive() || outro.phase === 'returning' || outroReturning) return;
   if (connState !== 'connected' || outro.host !== connHost) return toast('Connect to the same console first');
-  await load(Object.keys(outro.sends).map(outroLevel));
-  const wasEnded = outro.phase === 'ended';
+  outroReturning = true;
+  try {
+    await load(Object.keys(outro.sends).map(outroLevel));
+  } finally {
+    outroReturning = false;
+  }
+  const wasEnded = outro.phase === 'ended' || outro.phase === 'muting';
+  const grp = outro.grouped ? outroGroup() : null;
+  if (grp && grp.muted) {
+    grp.muted = false; // inputs come back at their own levels
+    saveMix();
+    reconcileMutes(outro.bus);
+    if (currentView === 'sends') rerenderCurrent();
+  }
   for (const [id, e] of Object.entries(outro.sends)) {
     if (e.skip) continue;
+    if (outro.grouped && !e.play && e.restored) {
+      e.done = true; // already back at its level under the group
+      continue;
+    }
     const p = outroLevel(id);
     if (!known(p)) continue;
     const cur = state.get(p);
@@ -3148,7 +3217,7 @@ function finishOutro() {
     const p = outroOnPath(id);
     if (e && !e.skip && known(p) && state.get(p) === 1) setParam(p, was);
   }
-  Object.assign(outro, { phase: 'idle', host: null, bus: null, progress: 0, sends: {}, playOn: {} });
+  Object.assign(outro, { phase: 'idle', host: null, bus: null, progress: 0, sends: {}, playOn: {}, grouped: false, noGroup: false });
   outroLast.clear();
   saveOutro();
   renderOutroPill();
@@ -3157,11 +3226,18 @@ function finishOutro() {
 }
 
 function outroTick() {
-  if (outro.phase !== 'ending' && outro.phase !== 'returning') return;
-  if (connState !== 'connected' || outro.host !== connHost) return;
+  if (!outroActive() || connState !== 'connected' || outro.host !== connHost) return;
+  if (outro.phase === 'muting') return outroMuteStep();
+  if (outro.phase === 'ended') {
+    // The operator unmuted the group themselves (e.g. at the start of the next
+    // service): that is "back to live", so the playback goes back down too.
+    const grp = outro.grouped ? outroGroup() : null;
+    if (outro.grouped && (!grp || !grp.muted)) backToLive();
+    return;
+  }
   outro.progress = Math.min(1, outro.progress + OUTRO_TICK_MS / 1000 / Math.max(1, outro.fadeSec));
   for (const [id, e] of Object.entries(outro.sends)) {
-    if (e.skip) continue;
+    if (e.skip || e.done) continue;
     const p = outroLevel(id);
     if (!known(p)) continue;
     const last = outroLast.get(p);
@@ -3175,11 +3251,8 @@ function outroTick() {
   }
   if (outro.progress >= 1) {
     if (outro.phase === 'returning') return finishOutro();
-    outro.phase = 'ended';
-    saveOutro();
-    renderOutroPill();
-    if (currentView === 'sermon') renderSermonView();
-    return;
+    outro.phase = 'muting';
+    return outroMuteStep();
   }
   const now = Date.now();
   if (now - outroSavedAt > 1000) {
@@ -3256,7 +3329,7 @@ function confirmOutro() {
   const lev = sermon.on ? ' Sermon mode turns off.' : '';
   confirmDialog(
     'Fade the stream to playback?',
-    `Over ${outro.fadeSec} s, every input on ${nameOf(s)} fades down and ${names} fades up to ${db}. Only the live stream changes: the room, wedges and faders stay as they are.${lev} “Back to live” puts every stream send back.`,
+    `Over ${outro.fadeSec} s, every input on ${nameOf(s)} fades down and ${names} fades up to ${db}. Then the inputs are held off by the “End of service” mute group on ${nameOf(s)} and their stream levels go back to normal underneath it. Only the live stream changes: the room, wedges and faders stay as they are.${lev} Next service, unmute that group (or click Back to live).`,
     'Fade to playback',
     startOutro,
   );
@@ -3265,7 +3338,7 @@ function confirmOutro() {
 function renderOutroPill() {
   const pill = $('outroPill');
   pill.hidden = !outroActive();
-  pill.textContent = outro.phase === 'ended' ? 'STREAM: PLAYBACK ONLY' : outro.phase === 'returning' ? 'Stream: back to live…' : 'Stream: fading to playback…';
+  pill.textContent = outro.phase === 'ended' || outro.phase === 'muting' ? 'STREAM: PLAYBACK ONLY' : outro.phase === 'returning' ? 'Stream: back to live…' : 'Stream: fading to playback…';
 }
 
 let outroEls = null;
@@ -3302,7 +3375,7 @@ function refreshOutroCard() {
   const pct = Math.round(outro.progress * 100);
   bar.style.width = `${pct}%`;
   const entries = Object.entries(outro.sends);
-  const inputs = entries.filter(([, e]) => !e.play).length;
+  const inputs = entries.filter(([, e]) => !e.play && !e.skip).length;
   const kept = entries.filter(([, e]) => e.skip).length;
   const keptTxt = kept ? ` · ${kept} moved by hand, left where you put ${kept === 1 ? 'it' : 'them'}` : '';
   const offline = connState !== 'connected' || outro.host !== connHost;
@@ -3312,7 +3385,9 @@ function refreshOutroCard() {
   else if (offline) text = 'Paused: not connected to this console. It carries on when the console is back.';
   else if (outro.phase === 'ending') text = `Fading ${inputs} input${inputs === 1 ? '' : 's'} down, playback up… ${pct}%${keptTxt}`;
   else if (outro.phase === 'returning') text = `Back to live… ${pct}%${keptTxt}`;
-  else text = `The stream is on playback only. ${inputs} input${inputs === 1 ? '' : 's'} faded down${keptTxt}. Click Back to live to restore them.`;
+  else if (outro.phase === 'muting') text = 'Muting the inputs with the End of service group and putting their levels back…';
+  else if (outro.noGroup) text = `The stream is on playback only. ${inputs} input${inputs === 1 ? '' : 's'} faded down${keptTxt}. Click Back to live to bring them up.`;
+  else text = `The stream is on playback only. ${inputs} input${inputs === 1 ? '' : 's'} muted by the “End of service” mute group (Monitor mixes), at their normal levels${keptTxt}. Next service: unmute that group or click Back to live; the playback goes back down too.`;
   if (outroActive() && playOff) text += ' Warning: a playback send is switched off (a mix mute group?), so the stream may be silent.';
   status.textContent = text;
 }

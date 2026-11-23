@@ -27,7 +27,8 @@ It talks to the console over the network with the X32's standard OSC protocol (U
   - Glides back to your levels when switched off.
 - End of service (one click, confirmed): fades every input's send to the stream bus down while the playback channel(s) fade up, so the closing slides roll with music on the stream.
   - Only the stream bus changes: the room, wedges, channel faders and mutes stay as they are.
-  - **Back to live** fades every send back to where it was. Any send moved by hand in between is left where you put it.
+  - When the fade ends, the inputs are held off by an "End of service" mute group on the stream bus, and their sends go back to their normal levels underneath it.
+  - Next service, unmute that group (Monitor mixes) or click **Back to live**: the inputs return at their levels and the playback fades back down. Any send moved by hand in between is left where you put it.
   - Playback channels, playback level and fade time are set in its Setup. A top-bar badge shows while the stream is on playback.
 
 **Alerts:** clipping on the live stream and main mix (all channels optional), a live input going silent, and an input running unusually low.
