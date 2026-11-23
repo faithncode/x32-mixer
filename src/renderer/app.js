@@ -2310,6 +2310,7 @@ function sermonRestore(ids) {
 
 function sermonTick() {
   if (!sermon.bus || connState !== 'connected' || !sameConsole()) return refreshSermonView();
+  if (outroActive() && outro.bus === sermon.bus) return refreshSermonView(); // End of service owns the stream sends
   if (!sermon.on) {
     if (sermon.pendingRestore) sermonReleaseStep();
     return refreshSermonView();
@@ -2421,6 +2422,10 @@ async function setSermonOn(on) {
   }
   if (on && connState !== 'connected') {
     toast('Connect to the console first');
+    return;
+  }
+  if (on && outroActive()) {
+    toast('The stream is on playback (End of service). Click Back to live first.');
     return;
   }
   sermonResumeAsk = false;
@@ -2697,6 +2702,7 @@ function renderSermonView() {
     ...[
       resume,
       StreamCard(),
+      OutroCard(),
       el('div', { class: 'sermon-head' }, [
         sw,
         el('div', {}, [
@@ -2771,6 +2777,7 @@ const SERMON_STATUS_TEXT = {
 function refreshSermonView() {
   if (currentView !== 'sermon') return;
   refreshStreamCard();
+  refreshOutroCard();
   refreshBandMeter();
   if (sermonStatusEl) {
     let text;
@@ -3042,8 +3049,278 @@ function refreshStreamCard() {
   else guardStatus.textContent = 'On · stream fader at your level';
 }
 
+// ---------------------------------------------------------------------------
+// End of service (stream bus only): fade every input's send to the stream bus
+// down while the playback channel(s) fade up, so the post-service slides roll
+// with music on the stream. The room is untouched: main mix, wedges, channel
+// faders and mutes never move. "Back to live" fades every send back to the
+// level it had before. A send someone moves by hand (or a scene recall changes)
+// is left where they put it. The fade survives a disconnect or restart.
+// ---------------------------------------------------------------------------
+const OUTRO_TICK_MS = 50;
+const OUTRO_KINDS = ['ch', 'auxin', 'fxrtn'];
+const OUTRO_DEFAULTS = { playback: [], playbackDb: 0, fadeSec: 10, phase: 'idle', host: null, bus: null, progress: 0, sends: {}, playOn: {} };
+let outro = { ...OUTRO_DEFAULTS, ...loadJson('outro', {}) };
+const saveOutro = () => localStorage.setItem('outro', JSON.stringify(outro));
+const outroActive = () => outro.phase !== 'idle';
+const outroLevel = (id) => X32.sendLevel(srcStrip(id), outro.bus);
+const outroOnPath = (id) => X32.sendOn(srcStrip(id), outro.bus);
+const outroLast = new Map(); // path -> value this run last wrote (not persisted)
+let outroSavedAt = 0;
+
+function outroPaths(bus) {
+  return OUTRO_KINDS.flatMap((k) => X32.strips(k)).flatMap((s) => [X32.sendLevel(s, bus), X32.sendOn(s, bus)]);
+}
+
+async function startOutro() {
+  const bus = sermon.bus;
+  if (connState !== 'connected') return toast('Connect to the console first');
+  if (!bus) return openSermonSetup(false);
+  if (!outro.playback.length) return openOutroSetup(true);
+  if (outroActive()) return;
+  await load(outroPaths(bus));
+  // Speech leveling hands its channels over: their "before" level is the
+  // operator's own level (without the leveling correction), and it stays off.
+  const operatorLevel = {};
+  if ((sermon.on || sermon.pendingRestore) && sermon.bus === bus) {
+    for (const [id, base] of Object.entries(sermon.base)) operatorLevel[id] = X32.dbToFader(Math.min(10, fromStoredDb(base)));
+    Object.assign(sermon, { on: false, pendingRestore: false, base: {}, corr: {}, learned: {} });
+    sermonResumeAsk = false;
+    sermonLive.clear();
+    saveSermon();
+    renderSermonPill();
+  }
+  const sends = {};
+  for (const s of OUTRO_KINDS.flatMap((k) => X32.strips(k))) {
+    const p = X32.sendLevel(s, bus);
+    if (!known(p)) continue;
+    if (outro.playback.includes(s.id)) {
+      sends[s.id] = { saved: state.get(p), from: state.get(p), to: X32.dbToFader(Math.min(FADER_MAX_DB, outro.playbackDb)), play: true };
+      continue;
+    }
+    const saved = s.id in operatorLevel ? operatorLevel[s.id] : state.get(p);
+    if (!(state.get(p) > 0) && !(saved > 0)) continue; // already silent on the stream
+    sends[s.id] = { saved, from: state.get(p), to: 0 };
+  }
+  const playOn = {};
+  for (const id of outro.playback) {
+    const p = X32.sendOn(srcStrip(id), bus);
+    if (known(p) && state.get(p) !== 1) {
+      playOn[id] = state.get(p);
+      setParam(p, 1); // the playback send must be on to be heard
+    }
+  }
+  outroLast.clear();
+  Object.assign(outro, { phase: 'ending', host: connHost, bus, progress: 0, sends, playOn });
+  saveOutro();
+  renderOutroPill();
+  if (currentView === 'sermon') renderSermonView();
+}
+
+async function backToLive() {
+  if (!outroActive() || outro.phase === 'returning') return;
+  if (connState !== 'connected' || outro.host !== connHost) return toast('Connect to the same console first');
+  await load(Object.keys(outro.sends).map(outroLevel));
+  const wasEnded = outro.phase === 'ended';
+  for (const [id, e] of Object.entries(outro.sends)) {
+    if (e.skip) continue;
+    const p = outroLevel(id);
+    if (!known(p)) continue;
+    const cur = state.get(p);
+    // Changed since the fade finished (by hand, a scene, another app): keep it.
+    if (wasEnded && Math.abs(cur - e.to) > SEND_TOL) {
+      e.skip = true;
+      continue;
+    }
+    Object.assign(e, { from: cur, to: e.saved });
+  }
+  outroLast.clear();
+  Object.assign(outro, { phase: 'returning', progress: 0 });
+  saveOutro();
+  renderOutroPill();
+  if (currentView === 'sermon') renderSermonView();
+}
+
+function finishOutro() {
+  // Playback sends we switched on go back off, unless someone changed them.
+  for (const [id, was] of Object.entries(outro.playOn)) {
+    const e = outro.sends[id];
+    const p = outroOnPath(id);
+    if (e && !e.skip && known(p) && state.get(p) === 1) setParam(p, was);
+  }
+  Object.assign(outro, { phase: 'idle', host: null, bus: null, progress: 0, sends: {}, playOn: {} });
+  outroLast.clear();
+  saveOutro();
+  renderOutroPill();
+  toast('Back to live · stream sends restored');
+  if (currentView === 'sermon') renderSermonView();
+}
+
+function outroTick() {
+  if (outro.phase !== 'ending' && outro.phase !== 'returning') return;
+  if (connState !== 'connected' || outro.host !== connHost) return;
+  outro.progress = Math.min(1, outro.progress + OUTRO_TICK_MS / 1000 / Math.max(1, outro.fadeSec));
+  for (const [id, e] of Object.entries(outro.sends)) {
+    if (e.skip) continue;
+    const p = outroLevel(id);
+    if (!known(p)) continue;
+    const last = outroLast.get(p);
+    if (dragging.has(p) || (last !== undefined && Math.abs(state.get(p) - last) > SEND_TOL)) {
+      e.skip = true; // moved by hand: their level wins
+      continue;
+    }
+    const v = e.from + (e.to - e.from) * outro.progress;
+    if (Math.abs(v - state.get(p)) > 1e-6) setParam(p, v);
+    outroLast.set(p, v);
+  }
+  if (outro.progress >= 1) {
+    if (outro.phase === 'returning') return finishOutro();
+    outro.phase = 'ended';
+    saveOutro();
+    renderOutroPill();
+    if (currentView === 'sermon') renderSermonView();
+    return;
+  }
+  const now = Date.now();
+  if (now - outroSavedAt > 1000) {
+    outroSavedAt = now;
+    saveOutro();
+  }
+  refreshOutroCard();
+}
+setInterval(outroTick, OUTRO_TICK_MS);
+
+function openOutroSetup(startAfter = false) {
+  const draft = { playback: [...outro.playback], playbackDb: outro.playbackDb, fadeSec: outro.fadeSec };
+  const body = el('div', { class: 'sermon-setup' });
+  const sources = () => [...X32.strips('ch'), ...X32.strips('auxin')];
+  function render() {
+    const picks = sources().map((s) =>
+      el('button', {
+        class: `toggle pick${draft.playback.includes(s.id) ? ' on' : ''}`,
+        text: nameOf(s),
+        onclick: () => {
+          draft.playback = draft.playback.includes(s.id) ? draft.playback.filter((x) => x !== s.id) : [...draft.playback, s.id];
+          render();
+        },
+      }),
+    );
+    const range = (label, key, min, max, step, fmt) => {
+      const input = el('input', { type: 'range', min, max, step, value: draft[key] });
+      const out = el('output', { text: fmt(draft[key]) });
+      input.addEventListener('input', () => {
+        draft[key] = Number(input.value);
+        out.textContent = fmt(draft[key]);
+      });
+      return el('label', { class: 'slider' }, [el('span', { class: 'slider-label', text: label }), input, out]);
+    };
+    body.replaceChildren(
+      el('div', { class: 'pick-title', text: 'Playback channel(s)' }),
+      el('div', { class: 'hint', text: 'The computer / media player that plays the music behind the closing slides (pick both sides if it is stereo).' }),
+      el('div', { class: 'pick-grid' }, picks),
+      el('div', { class: 'pick-title', text: 'Fade' }),
+      range('Playback level', 'playbackDb', -20, FADER_MAX_DB, 1, (v) => `${v > 0 ? '+' : ''}${v} dB`),
+      range('Fade time', 'fadeSec', 3, 30, 1, (v) => `${v} s`),
+    );
+  }
+  const close = () => dlg.remove();
+  const save = () => {
+    outro.playback = X32.ALL_STRIPS.filter((s) => draft.playback.includes(s.id)).map((s) => s.id);
+    outro.playbackDb = draft.playbackDb;
+    outro.fadeSec = draft.fadeSec;
+    saveOutro();
+    close();
+    if (currentView === 'sermon') renderSermonView();
+    if (startAfter && outro.playback.length) confirmOutro();
+  };
+  const dlg = el('div', { class: 'modal-back', onclick: (e) => e.target === dlg && close() }, [
+    el('div', { class: 'modal' }, [
+      el('div', { class: 'modal-head' }, [el('strong', { text: 'End of service setup' })]),
+      el('div', { class: 'modal-body' }, [body]),
+      el('div', { class: 'modal-foot' }, [
+        el('button', { class: 'ghost', text: 'Cancel', onclick: close }),
+        el('button', { class: 'primary', text: startAfter ? 'Save and continue' : 'Save', onclick: save }),
+      ]),
+    ]),
+  ]);
+  render();
+  document.body.append(dlg);
+}
+
+function confirmOutro() {
+  const s = streamStrip();
+  if (!s) return openSermonSetup(false);
+  if (!outro.playback.length) return openOutroSetup(true);
+  const names = outro.playback.map((id) => nameOf(srcStrip(id))).join(' + ');
+  const db = `${outro.playbackDb > 0 ? '+' : ''}${outro.playbackDb} dB`;
+  const lev = sermon.on ? ' Sermon mode turns off.' : '';
+  confirmDialog(
+    'Fade the stream to playback?',
+    `Over ${outro.fadeSec} s, every input on ${nameOf(s)} fades down and ${names} fades up to ${db}. Only the live stream changes: the room, wedges and faders stay as they are.${lev} “Back to live” puts every stream send back.`,
+    'Fade to playback',
+    startOutro,
+  );
+}
+
+function renderOutroPill() {
+  const pill = $('outroPill');
+  pill.hidden = !outroActive();
+  pill.textContent = outro.phase === 'ended' ? 'STREAM: PLAYBACK ONLY' : outro.phase === 'returning' ? 'Stream: back to live…' : 'Stream: fading to playback…';
+}
+
+let outroEls = null;
+function OutroCard() {
+  const s = streamStrip();
+  if (!s) {
+    outroEls = null;
+    return null;
+  }
+  const names = outro.playback.map((id) => nameOf(srcStrip(id))).join(' + ');
+  const bar = el('div', { class: 'outro-bar' });
+  const status = el('div', { class: 'hint' });
+  const busy = outro.phase === 'ending' || outro.phase === 'returning';
+  const main = !outroActive()
+    ? el('button', { class: 'primary big-btn', text: 'Fade stream to playback', disabled: !outro.playback.length, onclick: confirmOutro })
+    : el('button', { class: 'primary big-btn', text: outro.phase === 'returning' ? 'Returning…' : 'Back to live', disabled: outro.phase === 'returning', onclick: backToLive });
+  outroEls = { bar, status };
+  return el('div', { class: `stream-card outro-card${outroActive() ? ' active' : ''}` }, [
+    el('div', { class: 'stream-head' }, [
+      el('div', {}, [
+        el('div', { class: 'sermon-title', text: 'End of service' }),
+        el('div', { class: 'hint', text: outro.playback.length ? `Fades every input on ${nameOf(s)} down and brings up ${names} for the closing slides. The room is not affected.` : 'Choose the playback channel (the computer that plays music behind the closing slides) to use this.' }),
+      ]),
+      el('button', { class: 'ghost', text: 'Setup…', disabled: outroActive(), onclick: () => openOutroSetup(false) }),
+    ]),
+    busy ? el('div', { class: 'outro-meter' }, [bar]) : null,
+    el('div', { class: 'outro-row' }, [main, status]),
+  ]);
+}
+
+function refreshOutroCard() {
+  if (!outroEls || currentView !== 'sermon') return;
+  const { bar, status } = outroEls;
+  const pct = Math.round(outro.progress * 100);
+  bar.style.width = `${pct}%`;
+  const entries = Object.entries(outro.sends);
+  const inputs = entries.filter(([, e]) => !e.play).length;
+  const kept = entries.filter(([, e]) => e.skip).length;
+  const keptTxt = kept ? ` · ${kept} moved by hand, left where you put ${kept === 1 ? 'it' : 'them'}` : '';
+  const offline = connState !== 'connected' || outro.host !== connHost;
+  const playOff = outro.playback.some((id) => known(outroOnPath(id)) && state.get(outroOnPath(id)) !== 1);
+  let text;
+  if (outro.phase === 'idle') text = outro.playback.length ? `Playback ${outro.playbackDb > 0 ? '+' : ''}${outro.playbackDb} dB · fade ${outro.fadeSec} s` : '';
+  else if (offline) text = 'Paused: not connected to this console. It carries on when the console is back.';
+  else if (outro.phase === 'ending') text = `Fading ${inputs} input${inputs === 1 ? '' : 's'} down, playback up… ${pct}%${keptTxt}`;
+  else if (outro.phase === 'returning') text = `Back to live… ${pct}%${keptTxt}`;
+  else text = `The stream is on playback only. ${inputs} input${inputs === 1 ? '' : 's'} faded down${keptTxt}. Click Back to live to restore them.`;
+  if (outroActive() && playOff) text += ' Warning: a playback send is switched off (a mix mute group?), so the stream may be silent.';
+  status.textContent = text;
+}
+
 $('sermonPill').addEventListener('click', () => showView('sermon'));
+$('outroPill').addEventListener('click', () => showView('sermon'));
 renderSermonPill();
+renderOutroPill();
 
 // ---------------------------------------------------------------------------
 // Views
