@@ -760,6 +760,7 @@ let customLayer = loadJson('customLayer', ['ch1', 'ch2', 'ch9', 'bus1', 'dca1'])
 const LAYERS = [
   { id: 'in1', label: 'Ch 1–16', strips: () => X32.strips('ch').slice(0, 16) },
   { id: 'in2', label: 'Ch 17–32', strips: () => X32.strips('ch').slice(16) },
+  { id: 'all32', label: 'All 32', strips: () => X32.strips('ch') },
   { id: 'aux', label: 'Aux / FX', strips: () => [...X32.strips('auxin'), ...X32.strips('fxrtn')] },
   { id: 'bus', label: 'Buses', strips: () => X32.strips('bus') },
   { id: 'mtx', label: 'Matrix', strips: () => X32.strips('mtx') },
@@ -804,6 +805,7 @@ function renderMixer() {
   mixerScope = makeScope();
   const layer = LAYERS.find((l) => l.id === currentLayer) || LAYERS[0];
   const strips = layer.strips();
+  $('view-mixer').classList.toggle('fit32', layer.id === 'all32');
   const pinned = [X32.STRIP_BY_ID.mono1, X32.STRIP_BY_ID.main1];
   load([...strips, ...pinned].flatMap((s) => X32.stripViewPaths(s)));
   $('mixerStrips').replaceChildren(
@@ -1617,6 +1619,8 @@ function openMixGroupEditor(bus) {
   document.body.append(dlg);
 }
 
+const fitSends = () => localStorage.getItem('fitSends') === 'true';
+
 function renderBusBar() {
   busScope.dispose();
   busScope = makeScope();
@@ -1641,6 +1645,16 @@ function renderBusBar() {
       }),
     ),
     el('div', { class: 'layer-group right' }, [
+      el('button', {
+        class: fitSends() ? 'active' : '',
+        text: 'Fit 32',
+        title: 'Narrow strips so 32 channels fit on screen',
+        onclick: () => {
+          localStorage.setItem('fitSends', String(!fitSends()));
+          renderBusBar();
+          renderSends();
+        },
+      }),
       el('span', { class: 'bar-label', text: 'MIX MUTE' }),
       ...MixMuteButtons(busScope, currentBus),
       el('button', { class: 'ghost', text: 'Mix groups…', onclick: () => openMixGroupEditor(currentBus) }),
@@ -1657,6 +1671,7 @@ function renderSends() {
   const g = busGroups(currentBus);
   const dcaOf = new Map();
   for (const d of g.dcas) for (const id of d.members) dcaOf.set(id, d.name);
+  $('view-sends').classList.toggle('fit32', fitSends());
   $('sendStrips').replaceChildren(
     ...sources.map((s) => Strip(sendScope, s, { fader: X32.sendLevel(s, currentBus), on: X32.sendOn(s, currentBus), sendTo: currentBus, tag: dcaOf.get(s.id) })),
   );
@@ -2065,8 +2080,10 @@ function revealStrip(id, type) {
   const s = X32.STRIP_BY_ID[id];
   if (!s) return;
   if (currentView !== 'mixer') showView('mixer');
-  const layer = LAYERS.find((l) => l.id !== 'custom' && l.strips().some((x) => x.id === id));
-  if (layer && layer.id !== currentLayer && s.kind !== 'main') {
+  const has = (l) => l.strips().some((x) => x.id === id);
+  const layer = LAYERS.find((l) => l.id !== 'custom' && has(l));
+  const shown = LAYERS.some((l) => l.id === currentLayer && has(l));
+  if (layer && !shown && s.kind !== 'main') {
     currentLayer = layer.id;
     localStorage.setItem('layer', layer.id);
     renderLayerBar();
@@ -3460,6 +3477,47 @@ for (const id of ['mixerStrips', 'sendStrips']) {
     row.scrollLeft += e.deltaY;
     e.preventDefault();
   }, { passive: false });
+}
+
+// Mouse users can also grab a strip row anywhere that isn't a control and drag it
+// left or right. Touch already scrolls natively.
+const PAN_BLOCK = 'button, input, select, label, .fader, .pan, .knob, [role="slider"]';
+const PAN_SLOP = 5; // px of movement before a press becomes a drag, so clicks still work
+for (const id of ['mixerStrips', 'sendStrips']) {
+  const row = $(id);
+  row.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.pointerType === 'touch' || e.target.closest(PAN_BLOCK)) return;
+    if (e.target === row && (e.offsetX >= row.clientWidth || e.offsetY >= row.clientHeight)) return; // scrollbar
+    const startX = e.clientX;
+    const startLeft = row.scrollLeft;
+    let panning = false;
+    const move = (ev) => {
+      if (ev.pointerId !== e.pointerId) return;
+      if (!(ev.buttons & 1)) return end(ev); // released outside the window
+      const dx = ev.clientX - startX;
+      if (!panning) {
+        if (Math.abs(dx) < PAN_SLOP) return;
+        panning = true;
+        row.classList.add('panning');
+      }
+      row.scrollLeft = startLeft - dx;
+    };
+    const end = (ev) => {
+      if (ev.pointerId !== e.pointerId) return;
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', end, true);
+      window.removeEventListener('pointercancel', end, true);
+      if (!panning) return;
+      row.classList.remove('panning');
+      // A drag that began on a strip name or EQ picture must not also open it.
+      const swallow = (c) => c.stopPropagation();
+      window.addEventListener('click', swallow, true);
+      setTimeout(() => window.removeEventListener('click', swallow, true), 0);
+    };
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', end, true);
+    window.addEventListener('pointercancel', end, true);
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -108,6 +108,8 @@ main { flex: 1; min-height: 0; display: flex; }
 
 .console { flex: 1 1 auto; min-height: 200px; display: flex; background: var(--bg); }
 .strips { flex: 1; display: flex; gap: 2px; padding: 6px; overflow-x: auto; overflow-y: auto; }
+.strips { cursor: grab; }
+.strips.panning, .strips.panning * { cursor: grabbing !important; }
 /* Always-visible scrollbars so it's obvious there are more strips (mouse users). */
 .strips::-webkit-scrollbar, .detail-body::-webkit-scrollbar, .fx-grid::-webkit-scrollbar, .scene-grid::-webkit-scrollbar, .sermon-view::-webkit-scrollbar { width: 12px; height: 12px; }
 .strips::-webkit-scrollbar-thumb, .detail-body::-webkit-scrollbar-thumb, .fx-grid::-webkit-scrollbar-thumb, .scene-grid::-webkit-scrollbar-thumb, .sermon-view::-webkit-scrollbar-thumb { background: #3a3f48; border-radius: 6px; border: 3px solid var(--bg); }
@@ -167,6 +169,24 @@ main { flex: 1; min-height: 0; display: flex; }
 .btn-row > * { flex: 1; }
 .strip-main, .strip-mono { --strip-w: 78px; }
 .strip-send .strip-head { opacity: 0.9; }
+
+/* ---------- Compact: 32 channels across ---------- */
+/* Channel strips share the row width (32 across, 1px gaps); narrower than 28px
+   scrolls. The pinned strips on the right (mix DCAs, bus, main) stay as they are. */
+.fit32 .strips { gap: 1px; padding: 6px 2px; }
+.fit32 .strips .strip { width: max(28px, min(74px, calc((100% - 31px) / 32))); }
+.fit32 .strips .strip { padding: 3px 1px; gap: 3px; border-radius: 4px; }
+.fit32 .strips .strip-head { padding: 2px 1px; text-align: center; }
+.fit32 .strips .strip-num { font-size: 7.5px; letter-spacing: 0; white-space: nowrap; overflow: hidden; }
+.fit32 .strips .strip-name { font-size: 9.5px; text-overflow: clip; }
+.fit32 .strips .strip-badges, .fit32 .strips .fader-scale, .fit32 .strips .toggle.sel { display: none; }
+.fit32 .strips .strip-body { gap: 1px; }
+.fit32 .strips .meter { width: 4px; }
+.fit32 .strips .meter-pair { gap: 1px; }
+.fit32 .strips .fader-cap { width: min(22px, 100%); }
+.fit32 .strips .strip-db { font-size: 8.5px; white-space: nowrap; overflow: hidden; }
+.fit32 .strips .toggle { font-size: 8px; letter-spacing: 0; padding: 5px 0; min-width: 0; overflow: hidden; }
+.fit32 .strips .strip-tag { font-size: 8px; }
 
 /* ---------- Mix groups ---------- */
 .strip-tag { font-size: 9.5px; font-weight: 700; text-align: center; color: #c4b5fd; background: #221c33; border-radius: 3px; padding: 1px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

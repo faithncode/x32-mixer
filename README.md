@@ -35,6 +35,8 @@ It talks to the console over the network with the X32's standard OSC protocol (U
 
 **Mouse-friendly:**
 - Right-click menus for presets (0 dB, −10, off, center pan, reset, rename, color).
+- **All 32** layer (Mixer) and **Fit 32** button (Monitor mixes) narrow the strips so 32 channels fit on screen. Click a channel name to open it.
+- Drag any part of the strip row that isn’t a control (meters, dB readouts, names, gaps) left or right to move through the channels.
 - The wheel moves faders in 0.5 dB steps.
 - Knobs and sliders only take the wheel after you click them.
 - Screen size setting, and auto-reconnect to the last console.
