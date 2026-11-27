@@ -1,6 +1,6 @@
 {
   "name": "x32-mixer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Desktop remote control for Behringer X32 / Midas M32 consoles over OSC",
   "main": "src/main/main.js",
   "private": true,
