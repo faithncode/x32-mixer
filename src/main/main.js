@@ -2,9 +2,26 @@
 const path = require('node:path');
 const { app, BrowserWindow, ipcMain } = require('electron');
 const { X32Client, discover } = require('./x32client');
+const { createStore } = require('./store');
 
 // Dev/test runs can use their own settings folder so they never touch the user's.
 if (process.env.X32_USERDATA) app.setPath('userData', process.env.X32_USERDATA);
+
+// One window only: a second copy would overwrite the first one's saved settings.
+const primary = app.requestSingleInstanceLock();
+if (!primary) app.quit();
+app.on('second-instance', () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.focus();
+});
+
+const store = createStore(app.getPath('userData'));
+ipcMain.on('store:load', (e) => {
+  e.returnValue = store.load();
+});
+ipcMain.on('store:set', (_e, key, value) => store.set(key, value));
+app.on('will-quit', () => store.flush());
 
 const client = new X32Client();
 let win = null;
@@ -110,6 +127,7 @@ function devHooks(w) {
 }
 
 app.whenReady().then(() => {
+  if (!primary) return;
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

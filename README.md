@@ -15,7 +15,8 @@ It talks to the console over the network with the X32's standard OSC protocol (U
 
 **Monitor mixes**
 - Pick a bus and the faders become each input's send to it.
-- Mix groups per bus: mix DCAs and mix mute groups that affect only that mix (stored in the app).
+- Mix groups per bus: mix DCAs and mix mute groups that affect only that mix (stored in the app). A channel can be in several of them; DCA moves add up in dB.
+- Everything you set up (mix groups, stream bus, speech/band mapping, End of service, screen choices) is saved on the computer in `settings.json` in the app's data folder, with a backup copy. It stays after restarts, updates and a changed console IP.
 
 **Live stream**
 - Stream bus meter: peak, 3-second level, clip count, and speech-vs-songs balance with advice.
@@ -25,7 +26,7 @@ It talks to the console over the network with the X32's standard OSC protocol (U
   - Holds during songs, detected from the band group's combined level against a line you set.
   - Compensates when two people talk at once, and never boosts past the fader's +10 dB.
   - Glides back to your levels when switched off.
-- End of service (one click, confirmed): fades every input's send to the stream bus down while the playback channel(s) fade up, so the closing slides roll with music on the stream.
+- End of service, at the top of the Live stream tab; needs only the stream bus and playback channel, not Sermon mode (one click, confirmed): fades every input's send to the stream bus down while the playback channel(s) fade up, so the closing slides roll with music on the stream.
   - Only the stream bus changes: the room, wedges, channel faders and mutes stay as they are.
   - When the fade ends, the inputs are held off by an "End of service" mute group on the stream bus, and their sends go back to their normal levels underneath it.
   - Next service, unmute that group (Monitor mixes) or click **Back to live**: the inputs return at their levels and the playback fades back down. Any send moved by hand in between is left where you put it.

@@ -2,6 +2,49 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
+// Saved settings: kept in a file by the main process (see main/store.js).
+// ---------------------------------------------------------------------------
+const store = (() => {
+  const onDisk = window.x32.loadSettings();
+  const saved = new Map(Object.entries(onDisk || {}));
+  const api = {
+    getItem: (k) => (saved.has(k) ? saved.get(k) : null),
+    setItem: (k, v) => {
+      const next = String(v);
+      if (saved.get(k) === next) return;
+      saved.set(k, next);
+      window.x32.saveSetting(k, next);
+    },
+  };
+  if (!onDisk) {
+    // First start after updating: bring over what older versions kept in the
+    // browser storage. Mix groups used to be saved per console IP, so they
+    // looked lost when the console's address changed; merge them into one set.
+    const old = window.localStorage;
+    for (let i = 0; i < old.length; i++) {
+      const k = old.key(i);
+      if (!k.startsWith('mixGroups:')) api.setItem(k, old.getItem(k));
+    }
+    const current = `mixGroups:${old.getItem('host') || 'default'}`;
+    const others = Array.from({ length: old.length }, (_, i) => old.key(i)).filter((k) => k.startsWith('mixGroups:') && k !== current);
+    const merged = {};
+    for (const k of [current, ...others]) {
+      let groups = {};
+      try {
+        groups = JSON.parse(old.getItem(k)) || {};
+      } catch {
+        /* unreadable entry: skip it */
+      }
+      for (const [bus, g] of Object.entries(groups)) {
+        if (!merged[bus] && (g.dcas?.length || g.mutes?.length)) merged[bus] = g;
+      }
+    }
+    if (Object.keys(merged).length) api.setItem('mixGroups', JSON.stringify(merged));
+  }
+  return api;
+})();
+
+// ---------------------------------------------------------------------------
 // State store: path -> value, with per-path watchers.
 // ---------------------------------------------------------------------------
 const state = new Map();
@@ -750,7 +793,7 @@ function Strip(scope, s, mode = {}) {
 // ---------------------------------------------------------------------------
 const loadJson = (k, d) => {
   try {
-    return JSON.parse(localStorage.getItem(k)) ?? d;
+    return JSON.parse(store.getItem(k)) ?? d;
   } catch {
     return d;
   }
@@ -770,7 +813,7 @@ const LAYERS = [
 
 let mixerScope = makeScope();
 let barScope = makeScope();
-let currentLayer = localStorage.getItem('layer') || 'in1';
+let currentLayer = store.getItem('layer') || 'in1';
 
 function renderLayerBar() {
   barScope.dispose();
@@ -781,7 +824,7 @@ function renderLayerBar() {
       text: l.label,
       onclick: () => {
         currentLayer = l.id;
-        localStorage.setItem('layer', l.id);
+        store.setItem('layer', l.id);
         renderLayerBar();
         renderMixer();
       },
@@ -846,7 +889,7 @@ function openCustomEditor() {
           text: 'Save layer',
           onclick: () => {
             customLayer = X32.ALL_STRIPS.filter((s) => chosen.has(s.id)).map((s) => s.id);
-            localStorage.setItem('customLayer', JSON.stringify(customLayer));
+            store.setItem('customLayer', JSON.stringify(customLayer));
             close();
             renderMixer();
           },
@@ -861,7 +904,7 @@ function openCustomEditor() {
 // Detail panel
 // ---------------------------------------------------------------------------
 let detailScope = makeScope();
-let detailTab = localStorage.getItem('detailTab') || 'eq';
+let detailTab = store.getItem('detailTab') || 'eq';
 let clipboard = null; // {kind, from, values: Map(suffix -> value)}
 
 selectListeners.add((id) => renderDetail(id));
@@ -943,7 +986,7 @@ function renderDetail(id) {
         text: t.label,
         onclick: () => {
           detailTab = t.id;
-          localStorage.setItem('detailTab', t.id);
+          store.setItem('detailTab', t.id);
           renderDetail(id);
         },
       }),
@@ -1312,7 +1355,7 @@ function EqEditor(scope, s) {
 // ---------------------------------------------------------------------------
 let sendScope = makeScope();
 let busScope = makeScope();
-let currentBus = Number(localStorage.getItem('bus')) || 1;
+let currentBus = Number(store.getItem('bus')) || 1;
 const SEND_SOURCES = () => [...X32.strips('ch'), ...X32.strips('auxin'), ...X32.strips('fxrtn')];
 
 // ---------------------------------------------------------------------------
@@ -1321,26 +1364,23 @@ const SEND_SOURCES = () => [...X32.strips('ch'), ...X32.strips('auxin'), ...X32.
 // only when the user touches a group control.
 //
 // Mix DCA: each member has a "base" send level (dB); member level = base + group
-// offset. If a member's send changes for any other reason (its own fader here,
-// the console, another app), its base is re-learned, so the group never fights
-// manual moves and members keep their balance through the bottom of the throw.
-// A channel belongs to at most one mix DCA per bus.
+// offset. A channel can be in several mix DCAs; their offsets add up (in dB), as
+// DCAs do on the console. If a member's send changes for any other reason (its
+// own fader here, the console, another app), its base is re-learned, so the group
+// never fights manual moves and members keep their balance through the bottom of
+// the throw.
 //
 // Mute: a send is turned off while any muted group (DCA or mute group) contains
 // it. Its previous on/off is saved and restored when no muting group remains.
 // ---------------------------------------------------------------------------
 const MIX_DCA_MAX = 8;
 const MIX_MUTE_MAX = 6;
-const mixKey = () => `mixGroups:${localStorage.getItem('host') || 'default'}`;
-let mixData = loadJson(mixKey(), {});
-const reloadMixData = () => {
-  mixData = loadJson(mixKey(), {});
-};
+let mixData = loadJson('mixGroups', {});
 function busGroups(bus) {
   mixData[bus] ||= { dcas: [], mutes: [], savedOn: {}, base: {} };
   return mixData[bus];
 }
-const saveMix = () => localStorage.setItem(mixKey(), JSON.stringify(mixData));
+const saveMix = () => store.setItem('mixGroups', JSON.stringify(mixData));
 const srcStrip = (id) => X32.STRIP_BY_ID[id];
 const toStoredDb = (db) => (db === -Infinity ? null : db);
 const fromStoredDb = (v) => (v === null || v === undefined ? -Infinity : v);
@@ -1393,10 +1433,14 @@ setInterval(() => {
   }
 }, 1000);
 
-function learnBase(bus, d, id) {
+// Combined offset (dB) of every mix DCA holding this channel.
+const dcaOffset = (g, id) => g.dcas.reduce((sum, d) => (d.members.includes(id) ? sum + X32.faderToDb(d.pos) : sum), 0);
+const dcaMembers = (g) => new Set(g.dcas.flatMap((d) => d.members));
+
+function learnBase(bus, id) {
   const g = busGroups(bus);
   const p = X32.sendLevel(srcStrip(id), bus);
-  const offset = X32.faderToDb(d.pos);
+  const offset = dcaOffset(g, id);
   if (!known(p) || offset === -Infinity) return;
   g.base[id] = toStoredDb(X32.faderToDb(state.get(p)) - offset);
 }
@@ -1404,34 +1448,31 @@ function learnBase(bus, d, id) {
 // User moved a mix DCA fader.
 function moveMixDca(bus, d, pos) {
   const g = busGroups(bus);
-  for (const id of d.members) if (!(id in g.base)) learnBase(bus, d, id);
+  for (const id of d.members) if (!(id in g.base)) learnBase(bus, id);
   d.pos = pos;
-  const offset = X32.faderToDb(pos);
   for (const id of d.members) {
     const p = X32.sendLevel(srcStrip(id), bus);
     if (!known(p) || !(id in g.base) || dragging.has(p)) continue;
-    const v = groupLevel(fromStoredDb(g.base[id]), offset);
+    const v = groupLevel(fromStoredDb(g.base[id]), dcaOffset(g, id));
     if (Math.abs(v - state.get(p)) > 1e-6) setParam(p, v);
   }
   saveMix();
 }
 
-// Re-learn a member's base when its send changes from anywhere but the group.
+// Re-learn a member's base when its send changes from anywhere but its groups.
 function trackMixDcaMembers(scope, bus) {
   const g = busGroups(bus);
-  for (const d of g.dcas) {
-    for (const id of d.members) {
-      const p = X32.sendLevel(srcStrip(id), bus);
-      scope.watch(p, (v) => {
-        if (typeof v !== 'number') return;
-        const offset = X32.faderToDb(d.pos);
-        if (id in g.base && Math.abs(groupLevel(fromStoredDb(g.base[id]), offset) - v) < SEND_TOL) return;
-        if (dragging.has(p)) return; // re-learn after the drag, not during it
-        if (offset === -Infinity) return; // group fully down: keep the remembered balance
-        g.base[id] = toStoredDb(X32.faderToDb(v) - offset);
-        saveMix();
-      });
-    }
+  for (const id of dcaMembers(g)) {
+    const p = X32.sendLevel(srcStrip(id), bus);
+    scope.watch(p, (v) => {
+      if (typeof v !== 'number') return;
+      const offset = dcaOffset(g, id);
+      if (id in g.base && Math.abs(groupLevel(fromStoredDb(g.base[id]), offset) - v) < SEND_TOL) return;
+      if (dragging.has(p)) return; // re-learn after the drag, not during it
+      if (offset === -Infinity) return; // a group fully down: keep the remembered balance
+      g.base[id] = toStoredDb(X32.faderToDb(v) - offset);
+      saveMix();
+    });
   }
 }
 
@@ -1527,20 +1568,16 @@ function openMixGroupEditor(bus) {
         grp.name = nameInput.value || '—';
       });
       nameInput.addEventListener('change', render);
-      const ownerOf = (id) => (sel.kind === 'dcas' ? draft.dcas.find((d) => d !== grp && d.members.includes(id)) : null);
       const picks = SEND_SOURCES().map((s) => {
-        const other = ownerOf(s.id);
+        const others = draft[sel.kind].filter((x) => x !== grp && x.members.includes(s.id));
         const b = el('button', {
-          class: `toggle pick${grp.members.includes(s.id) ? ' on' : ''}${other ? ' taken' : ''}`,
+          class: `toggle pick${grp.members.includes(s.id) ? ' on' : ''}`,
           text: nameOf(s),
-          title: other ? `In ${other.name}; selecting moves it here` : '',
+          title: others.length ? `Also in ${others.map((x) => x.name).join(', ')}` : '',
         });
         b.addEventListener('click', () => {
           if (grp.members.includes(s.id)) grp.members = grp.members.filter((m) => m !== s.id);
-          else {
-            if (other) other.members = other.members.filter((m) => m !== s.id);
-            grp.members.push(s.id);
-          }
+          else grp.members.push(s.id);
           render();
         });
         return b;
@@ -1560,14 +1597,12 @@ function openMixGroupEditor(bus) {
           }),
         ]),
         el('div', { class: 'mg-select-row' }, [
-          el('span', { class: 'hint', text: sel.kind === 'dcas' ? 'A channel can be in one mix DCA per bus. Select all skips channels already in another mix DCA.' : 'Channels can be in several mute groups.' }),
+          el('span', { class: 'hint', text: sel.kind === 'dcas' ? 'A channel can be in several mix DCAs; their fader moves add up.' : 'A channel can be in several mute groups; it stays muted while any of them is on.' }),
           el('button', {
             class: 'ghost',
             text: 'Select all',
             onclick: () => {
-              grp.members = SEND_SOURCES()
-                .filter((s) => grp.members.includes(s.id) || !ownerOf(s.id))
-                .map((s) => s.id);
+              grp.members = SEND_SOURCES().map((s) => s.id);
               render();
             },
           }),
@@ -1588,21 +1623,17 @@ function openMixGroupEditor(bus) {
 
   const close = () => dlg.remove();
   const save = () => {
-    const prevDca = new Map();
-    for (const d of g.dcas) for (const id of d.members) prevDca.set(id, d.id);
+    const groupsOf = () => new Map([...dcaMembers(g)].map((id) => [id, g.dcas.filter((d) => d.members.includes(id)).map((d) => d.id).sort().join()]));
+    const before = groupsOf();
     g.dcas = draft.dcas;
     g.mutes = draft.mutes;
-    const nowIn = new Set();
-    for (const d of g.dcas) {
-      for (const id of d.members) {
-        nowIn.add(id);
-        if (prevDca.get(id) !== d.id) {
-          delete g.base[id];
-          learnBase(bus, d, id); // joining a group never moves the send
-        }
-      }
+    const after = groupsOf();
+    for (const [id, groups] of after) {
+      if (before.get(id) === groups) continue;
+      delete g.base[id];
+      learnBase(bus, id); // joining or leaving a group never moves the send
     }
-    for (const id of Object.keys(g.base)) if (!nowIn.has(id)) delete g.base[id];
+    for (const id of Object.keys(g.base)) if (!after.has(id)) delete g.base[id];
     reconcileMutes(bus);
     close();
     renderBusBar();
@@ -1619,7 +1650,7 @@ function openMixGroupEditor(bus) {
   document.body.append(dlg);
 }
 
-const fitSends = () => localStorage.getItem('fitSends') === 'true';
+const fitSends = () => store.getItem('fitSends') === 'true';
 
 function renderBusBar() {
   busScope.dispose();
@@ -1633,7 +1664,7 @@ function renderBusBar() {
           class: b.n === currentBus ? 'active' : '',
           onclick: () => {
             currentBus = b.n;
-            localStorage.setItem('bus', String(b.n));
+            store.setItem('bus', String(b.n));
             renderBusBar();
             renderSends();
           },
@@ -1650,7 +1681,7 @@ function renderBusBar() {
         text: 'Fit 32',
         title: 'Narrow strips so 32 channels fit on screen',
         onclick: () => {
-          localStorage.setItem('fitSends', String(!fitSends()));
+          store.setItem('fitSends', String(!fitSends()));
           renderBusBar();
           renderSends();
         },
@@ -1670,7 +1701,7 @@ function renderSends() {
   load([...sources.flatMap((s) => [X32.sendLevel(s, currentBus), X32.sendOn(s, currentBus), ...X32.stripViewPaths(s)]), ...X32.stripViewPaths(bus)]);
   const g = busGroups(currentBus);
   const dcaOf = new Map();
-  for (const d of g.dcas) for (const id of d.members) dcaOf.set(id, d.name);
+  for (const d of g.dcas) for (const id of d.members) dcaOf.set(id, dcaOf.has(id) ? `${dcaOf.get(id)} + ${d.name}` : d.name);
   $('view-sends').classList.toggle('fit32', fitSends());
   $('sendStrips').replaceChildren(
     ...sources.map((s) => Strip(sendScope, s, { fader: X32.sendLevel(s, currentBus), on: X32.sendOn(s, currentBus), sendTo: currentBus, tag: dcaOf.get(s.id) })),
@@ -1805,7 +1836,7 @@ function renderSceneTools() {
 // Connection bar
 // ---------------------------------------------------------------------------
 const hostInput = $('hostInput');
-hostInput.value = localStorage.getItem('host') || '';
+hostInput.value = store.getItem('host') || '';
 let connState = 'disconnected';
 let connHost = null;
 
@@ -1845,7 +1876,6 @@ function showStatus(s) {
   $('connectBtn').classList.toggle('primary', s.state === 'disconnected');
   if (s.state === 'connected') {
     if (s.resync) resetLocalState(); // console was away: reload everything fresh
-    reloadMixData();
     if (sermon.on && sermon.bus) load(sermonPaths());
     if (currentView === 'sends') renderBusBar();
     rerenderCurrent();
@@ -1864,7 +1894,7 @@ $('connectBtn').addEventListener('click', async () => {
     hostInput.focus();
     return;
   }
-  localStorage.setItem('host', host);
+  store.setItem('host', host);
   resetLocalState();
   await window.x32.connect(host);
 });
@@ -1925,7 +1955,7 @@ const SAMPLE_MS = 500;
 const HISTORY = 240; // 2 minutes of samples
 const ALERT_DEFAULTS = { clip: true, clipAll: false, loss: true, low: true, sound: false, lossSec: 10 };
 let alertCfg = { ...ALERT_DEFAULTS, ...loadJson('alertCfg', {}) };
-const saveAlertCfg = () => localStorage.setItem('alertCfg', JSON.stringify(alertCfg));
+const saveAlertCfg = () => store.setItem('alertCfg', JSON.stringify(alertCfg));
 
 const ALERT_STRIPS = X32.ALL_STRIPS.filter((s) => s.meter);
 const LEVEL_KINDS = new Set(['ch', 'auxin']); // signal-loss / low-level apply to inputs
@@ -2085,7 +2115,7 @@ function revealStrip(id, type) {
   const shown = LAYERS.some((l) => l.id === currentLayer && has(l));
   if (layer && !shown && s.kind !== 'main') {
     currentLayer = layer.id;
-    localStorage.setItem('layer', layer.id);
+    store.setItem('layer', layer.id);
     renderLayerBar();
     renderMixer();
   }
@@ -2242,7 +2272,7 @@ function bandGroup() {
 }
 let bandNow = { level: -Infinity, playing: [], total: 0, song: false };
 const sermonLive = new Map(); // id -> {level, status}
-const saveSermon = () => localStorage.setItem('sermon', JSON.stringify(sermon));
+const saveSermon = () => store.setItem('sermon', JSON.stringify(sermon));
 const sermonSend = (id) => X32.sendLevel(srcStrip(id), sermon.bus);
 const sermonOnPath = (id) => X32.sendOn(srcStrip(id), sermon.bus);
 const sermonPaths = () => sermon.channels.flatMap((id) => [sermonSend(id), sermonOnPath(id)]);
@@ -2718,8 +2748,8 @@ function renderSermonView() {
   view.replaceChildren(
     ...[
       resume,
-      StreamCard(),
       OutroCard(),
+      StreamCard(),
       el('div', { class: 'sermon-head' }, [
         sw,
         el('div', {}, [
@@ -2860,7 +2890,7 @@ const GUARD_RECOVER_DB = 0.5;
 const STREAM_CLIP_DB = -0.2;
 const BALANCE_WINDOW = 600; // 5 minutes of 500 ms samples
 let guard = { on: false, host: null, base: null, offset: 0, pendingRestore: false, ...loadJson('streamGuard', {}) };
-const saveGuard = () => localStorage.setItem('streamGuard', JSON.stringify(guard));
+const saveGuard = () => store.setItem('streamGuard', JSON.stringify(guard));
 const streamStrip = () => (sermon.bus ? X32.STRIP_BY_ID[`bus${sermon.bus}`] : null);
 const stream = { speech: [], song: [], clips: [], lastCut: 0, calmSince: 0, peak: -Infinity, loud: -Infinity, kind: null };
 const powerMean = (dbs) => (dbs.length ? 10 * Math.log10(dbs.reduce((a, d) => a + Math.pow(10, d / 10), 0) / dbs.length) : -Infinity);
@@ -3078,7 +3108,7 @@ const OUTRO_TICK_MS = 50;
 const OUTRO_KINDS = ['ch', 'auxin', 'fxrtn'];
 const OUTRO_DEFAULTS = { playback: [], playbackDb: 0, fadeSec: 10, phase: 'idle', host: null, bus: null, progress: 0, sends: {}, playOn: {} };
 let outro = { ...OUTRO_DEFAULTS, ...loadJson('outro', {}) };
-const saveOutro = () => localStorage.setItem('outro', JSON.stringify(outro));
+const saveOutro = () => store.setItem('outro', JSON.stringify(outro));
 const outroActive = () => outro.phase !== 'idle';
 const outroLevel = (id) => X32.sendLevel(srcStrip(id), outro.bus);
 const outroOnPath = (id) => X32.sendOn(srcStrip(id), outro.bus);
@@ -3281,7 +3311,7 @@ function outroTick() {
 setInterval(outroTick, OUTRO_TICK_MS);
 
 function openOutroSetup(startAfter = false) {
-  const draft = { playback: [...outro.playback], playbackDb: outro.playbackDb, fadeSec: outro.fadeSec };
+  const draft = { bus: sermon.bus, playback: [...outro.playback], playbackDb: outro.playbackDb, fadeSec: outro.fadeSec };
   const body = el('div', { class: 'sermon-setup' });
   const sources = () => [...X32.strips('ch'), ...X32.strips('auxin')];
   function render() {
@@ -3304,7 +3334,18 @@ function openOutroSetup(startAfter = false) {
       });
       return el('label', { class: 'slider' }, [el('span', { class: 'slider-label', text: label }), input, out]);
     };
+    // First-time setup without Sermon mode: the stream bus is chosen here too.
+    let busRow = null;
+    if (!sermon.bus) {
+      const busSel = el('select', {}, [el('option', { value: '', text: '— Choose bus —' }), ...X32.strips('bus').map((b) => el('option', { value: b.n, text: `${b.defaultName} · ${nameOf(b)}` }))]);
+      busSel.value = draft.bus || '';
+      busSel.addEventListener('change', () => {
+        draft.bus = Number(busSel.value) || null;
+      });
+      busRow = el('div', { class: 'setup-row' }, [el('span', { class: 'switch-label', text: 'Live stream bus' }), busSel]);
+    }
     body.replaceChildren(
+      ...[busRow].filter(Boolean),
       el('div', { class: 'pick-title', text: 'Playback channel(s)' }),
       el('div', { class: 'hint', text: 'The computer / media player that plays the music behind the closing slides (pick both sides if it is stereo).' }),
       el('div', { class: 'pick-grid' }, picks),
@@ -3319,9 +3360,14 @@ function openOutroSetup(startAfter = false) {
     outro.playbackDb = draft.playbackDb;
     outro.fadeSec = draft.fadeSec;
     saveOutro();
+    if (!sermon.bus && draft.bus) {
+      sermon.bus = draft.bus;
+      saveSermon();
+      load(sermonPaths());
+    }
     close();
     if (currentView === 'sermon') renderSermonView();
-    if (startAfter && outro.playback.length) confirmOutro();
+    if (startAfter && sermon.bus && outro.playback.length) confirmOutro();
   };
   const dlg = el('div', { class: 'modal-back', onclick: (e) => e.target === dlg && close() }, [
     el('div', { class: 'modal' }, [
@@ -3339,8 +3385,7 @@ function openOutroSetup(startAfter = false) {
 
 function confirmOutro() {
   const s = streamStrip();
-  if (!s) return openSermonSetup(false);
-  if (!outro.playback.length) return openOutroSetup(true);
+  if (!s || !outro.playback.length) return openOutroSetup(true);
   const names = outro.playback.map((id) => nameOf(srcStrip(id))).join(' + ');
   const db = `${outro.playbackDb > 0 ? '+' : ''}${outro.playbackDb} dB`;
   const lev = sermon.on ? ' Sermon mode turns off.' : '';
@@ -3359,25 +3404,23 @@ function renderOutroPill() {
 }
 
 let outroEls = null;
+// Always shown: it needs only a stream bus and a playback channel, not Sermon
+// mode or the clip guard.
 function OutroCard() {
   const s = streamStrip();
-  if (!s) {
-    outroEls = null;
-    return null;
-  }
   const names = outro.playback.map((id) => nameOf(srcStrip(id))).join(' + ');
   const bar = el('div', { class: 'outro-bar' });
   const status = el('div', { class: 'hint' });
   const busy = outro.phase === 'ending' || outro.phase === 'returning';
   const main = !outroActive()
-    ? el('button', { class: 'primary big-btn', text: 'Fade stream to playback', disabled: !outro.playback.length, onclick: confirmOutro })
+    ? el('button', { class: 'primary big-btn', text: 'Fade stream to playback', onclick: confirmOutro })
     : el('button', { class: 'primary big-btn', text: outro.phase === 'returning' ? 'Returning…' : 'Back to live', disabled: outro.phase === 'returning', onclick: backToLive });
   outroEls = { bar, status };
   return el('div', { class: `stream-card outro-card${outroActive() ? ' active' : ''}` }, [
     el('div', { class: 'stream-head' }, [
       el('div', {}, [
         el('div', { class: 'sermon-title', text: 'End of service' }),
-        el('div', { class: 'hint', text: outro.playback.length ? `Fades every input on ${nameOf(s)} down and brings up ${names} for the closing slides. The room is not affected.` : 'Choose the playback channel (the computer that plays music behind the closing slides) to use this.' }),
+        el('div', { class: 'hint', text: s && outro.playback.length ? `Fades every input on ${nameOf(s)} down and brings up ${names} for the closing slides. The room is not affected.` : 'For the closing slides: fades the inputs down on the live stream and brings up the playback. Click Setup… to choose the stream bus and the playback channel.' }),
       ]),
       el('button', { class: 'ghost', text: 'Setup…', disabled: outroActive(), onclick: () => openOutroSetup(false) }),
     ]),
@@ -3439,7 +3482,7 @@ function showView(name) {
   for (const v of VIEWS) $(`view-${v}`).hidden = v !== name;
   // One channel panel, shown under whichever console view is open.
   if (name === 'mixer' || name === 'sends') $(`view-${name}`).append($('detail'));
-  localStorage.setItem('view', name);
+  store.setItem('view', name);
   if (name === 'mixer') {
     renderLayerBar();
     renderMixer();
@@ -3529,18 +3572,18 @@ const ZOOMS = [
   ['Large', 1.15],
   ['Extra large', 1.3],
 ];
-const applyZoom = () => window.x32.setZoom(Number(localStorage.getItem('zoom')) || 1);
+const applyZoom = () => window.x32.setZoom(Number(store.getItem('zoom')) || 1);
 applyZoom();
-const autoConnect = () => localStorage.getItem('autoConnect') !== 'false';
+const autoConnect = () => store.getItem('autoConnect') !== 'false';
 
 $('settingsBtn').addEventListener('click', (e) => {
-  const zoom = Number(localStorage.getItem('zoom')) || 1;
+  const zoom = Number(store.getItem('zoom')) || 1;
   showMenu(e, 'Settings', [
     ...ZOOMS.map(([label, f]) => ({
       label: `Screen size: ${label}`,
       checked: zoom === f,
       action: () => {
-        localStorage.setItem('zoom', String(f));
+        store.setItem('zoom', String(f));
         applyZoom();
       },
     })),
@@ -3548,7 +3591,7 @@ $('settingsBtn').addEventListener('click', (e) => {
     {
       label: 'Reconnect to last console on start',
       checked: autoConnect(),
-      action: () => localStorage.setItem('autoConnect', String(!autoConnect())),
+      action: () => store.setItem('autoConnect', String(!autoConnect())),
     },
   ]);
 });
@@ -3556,8 +3599,8 @@ document.body.classList.add(`platform-${window.x32.platform}`);
 
 (async function init() {
   for (const [p, v] of await window.x32.snapshot()) apply(p, v);
-  showView(localStorage.getItem('view') || 'mixer');
+  showView(store.getItem('view') || 'mixer');
   const st = await window.x32.status();
-  const host = localStorage.getItem('host');
+  const host = store.getItem('host');
   if (autoConnect() && host && st.state === 'disconnected') window.x32.connect(host);
 })();

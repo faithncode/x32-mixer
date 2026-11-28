@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('x32', {
   snapshot: () => ipcRenderer.invoke('x32:snapshot'),
   set: (path, value) => ipcRenderer.send('x32:set', path, value),
   command: (address, args) => ipcRenderer.send('x32:command', address, args),
+  loadSettings: () => ipcRenderer.sendSync('store:load'),
+  saveSetting: (key, value) => ipcRenderer.send('store:set', key, value),
   setZoom: (factor) => webFrame.setZoomFactor(factor),
   platform: process.platform,
   onStatus: listen('x32:status'),

@@ -205,7 +205,6 @@ main { flex: 1; min-height: 0; display: flex; }
 .mg-select-row { display: flex; align-items: center; gap: 6px; }
 .mg-select-row .hint { margin-right: auto; }
 .mg-select-row button { white-space: nowrap; flex: none; }
-.toggle.pick.taken:not(.on) { color: #a78bfa; border-style: dashed; }
 .danger-text { color: var(--mute); margin-left: auto; }
 
 /* ---------- Right-click menu ---------- */
